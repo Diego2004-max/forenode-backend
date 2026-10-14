@@ -3,11 +3,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# Configuración de base de datos PostgreSQL (Supabase / Render)
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/forenode_db"
-)
+DATABASE_URL = "postgresql://postgres.bzyfsijhlwpgvuuawldt:ForenodeSecure2026!_db@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
