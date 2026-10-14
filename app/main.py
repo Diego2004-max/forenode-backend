@@ -23,6 +23,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Ruta raíz para evitar el 404 en Render y mantener el servicio activo
+@app.get("/")
+def read_root():
+    return {"status": "online", "message": "Forenode Global AI Enterprise Engine is running successfully."}
+
 class UserRegister(BaseModel):
     email: str
     password: str
@@ -107,7 +112,6 @@ async def run_matching_engine(
     db: Session = Depends(database.get_db)
 ):
     try:
-        # Consumo de API real Open-Meteo
         url = f"https://api.open-meteo.com/v1/forecast?latitude={request.latitude}&longitude={request.longitude}&current=temperature_2m,precipitation"
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=5.0)
