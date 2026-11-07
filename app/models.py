@@ -11,7 +11,7 @@ def utc_now() -> datetime:
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "forenode_users"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
@@ -28,7 +28,7 @@ class InventorySnapshot(Base):
     quantity_kg: Mapped[float] = mapped_column(Float)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     source_reference: Mapped[str] = mapped_column(String(500))
-    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_by: Mapped[int] = mapped_column(ForeignKey("forenode_users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -42,7 +42,7 @@ class DemandObservation(Base):
     temperature_c: Mapped[float] = mapped_column(Float)
     precipitation_mm: Mapped[float] = mapped_column(Float)
     source_reference: Mapped[str] = mapped_column(String(500))
-    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_by: Mapped[int] = mapped_column(ForeignKey("forenode_users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -75,6 +75,6 @@ class MatchingRun(Base):
     model_version: Mapped[str] = mapped_column(String(64))
     weather_source: Mapped[str] = mapped_column(String(120))
     inventory_snapshot_id: Mapped[int] = mapped_column(ForeignKey("inventory_snapshots.id"))
-    requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    requested_by: Mapped[int] = mapped_column(ForeignKey("forenode_users.id"))
     explanation: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

@@ -33,6 +33,8 @@ pytest -q
 
 Los endpoints operativos requieren un Bearer token emitido por la API o por Supabase Auth.
 
+La autenticación propia utiliza la tabla `forenode_users` para mantener aislado el esquema Enterprise de tablas `users` heredadas de prototipos anteriores.
+
 ## Variables de producción
 
 `DATABASE_URL`, `JWT_SECRET`, `CORS_ORIGINS` y `SUPABASE_URL` son obligatorias para un despliegue completo. `SUPABASE_JWT_SECRET` solo se necesita en proyectos Supabase que todavía firman tokens con HS256.
