@@ -16,7 +16,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     full_name: Mapped[str] = mapped_column(String(160))
-    role: Mapped[str] = mapped_column(String(40), default="analyst")
+    role: Mapped[str] = mapped_column(String(40), default="viewer")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

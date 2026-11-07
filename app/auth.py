@@ -76,3 +76,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         db.commit()
         db.refresh(user)
     return user
+
+
+def require_role(*roles: str):
+    def dependency(user: models.User = Depends(get_current_user)) -> models.User:
+        if user.role not in roles:
+            raise HTTPException(status_code=403, detail="No tienes permisos para esta operación.")
+        return user
+    return dependency

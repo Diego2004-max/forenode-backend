@@ -55,6 +55,12 @@ def migrate_legacy_user_foreign_keys() -> None:
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     migrate_legacy_user_foreign_keys()
+    if settings.admin_email:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE forenode_users SET role = 'admin' WHERE lower(email) = lower(:email)"),
+                {"email": settings.admin_email},
+            )
     yield
 
 
@@ -88,6 +94,7 @@ def token_for(user: models.User) -> schemas.TokenResponse:
         expires_in=settings.access_token_expire_minutes * 60,
         full_name=user.full_name,
         email=user.email,
+        role=user.role,
     )
 
 
@@ -115,11 +122,27 @@ def register(payload: schemas.UserRegister, db: Session = Depends(get_db)) -> sc
     email = payload.email.lower()
     if db.scalar(select(models.User).where(models.User.email == email)):
         raise HTTPException(status_code=409, detail="El correo ya está registrado.")
-    user = models.User(email=email, hashed_password=auth.get_password_hash(payload.password), full_name=payload.full_name.strip())
+    user = models.User(email=email, hashed_password=auth.get_password_hash(payload.password), full_name=payload.full_name.strip(), role="viewer")
     db.add(user)
     db.commit()
     db.refresh(user)
     return token_for(user)
+
+
+@app.get("/api/v1/admin/users", response_model=list[schemas.UserResponse], tags=["admin"])
+def list_users(_: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> list[models.User]:
+    return list(db.scalars(select(models.User).order_by(models.User.created_at)).all())
+
+
+@app.patch("/api/v1/admin/users/{user_id}/role", response_model=schemas.UserResponse, tags=["admin"])
+def update_user_role(user_id: int, payload: schemas.RoleUpdate, _: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
+    user = db.get(models.User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    user.role = payload.role
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 @app.post("/api/v1/auth/login", response_model=schemas.TokenResponse, tags=["auth"])

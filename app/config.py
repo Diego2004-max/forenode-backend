@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     weather_timeout_seconds: float = Field(default=10.0, ge=1.0, le=30.0)
     supabase_url: str | None = None
     supabase_jwt_secret: str | None = None
+    admin_email: str | None = None
 
     @field_validator("database_url")
     @classmethod

@@ -15,6 +15,19 @@ class TokenResponse(BaseModel):
     expires_in: int
     full_name: str
     email: EmailStr
+    role: str
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    email: EmailStr
+    full_name: str
+    role: str
+
+
+class RoleUpdate(BaseModel):
+    role: str = Field(pattern="^(viewer|analyst|admin)$")
 
 
 class InventoryCreate(BaseModel):
