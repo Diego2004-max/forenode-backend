@@ -16,9 +16,41 @@ from .weather import WeatherService
 settings = get_settings()
 
 
+def migrate_legacy_user_foreign_keys() -> None:
+    """Point existing Enterprise tables at the isolated user table.
+
+    The first Enterprise deployment created these FKs against the legacy
+    `users` table. `create_all` cannot alter an existing constraint, so the
+    adjustment is intentionally small and idempotent.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    targets = {
+        "inventory_snapshots": "created_by",
+        "demand_observations": "created_by",
+        "matching_runs": "requested_by",
+    }
+    with engine.begin() as connection:
+        for table, column in targets.items():
+            constraints = connection.execute(text("""
+                SELECT c.conname
+                FROM pg_constraint AS c
+                JOIN pg_class AS t ON t.oid = c.conrelid
+                JOIN pg_attribute AS a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+                WHERE c.contype = 'f' AND t.relname = :table_name AND a.attname = :column_name
+            """), {"table_name": table, "column_name": column}).scalars().all()
+            for constraint in constraints:
+                connection.execute(text(f'ALTER TABLE "{table}" DROP CONSTRAINT "{constraint}"'))
+            connection.execute(text(
+                f'ALTER TABLE "{table}" ADD CONSTRAINT "{table}_{column}_enterprise_fkey" '
+                f'FOREIGN KEY ("{column}") REFERENCES "forenode_users" (id)'
+            ))
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    migrate_legacy_user_foreign_keys()
     yield
 
 
