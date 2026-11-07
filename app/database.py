@@ -1,17 +1,20 @@
-import os
+from collections.abc import Generator
+
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-DATABASE_URL = "postgresql://postgres.bzyfsijhlwpgvuuawldt:ForenodeSecure2026!_db@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
+from .config import get_settings
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+class Base(DeclarativeBase):
+    pass
+
+
+settings = get_settings()
+engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=300)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
+def get_db() -> Generator[Session, None, None]:
+    with SessionLocal() as session:
+        yield session

@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: forenode-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://forenode-frontend.vercel.app
+      - key: SUPABASE_URL
+        value: https://bzyfsijhlwpgvuuawldt.supabase.co
+      - key: SUPABASE_JWT_SECRET
+        sync: false
