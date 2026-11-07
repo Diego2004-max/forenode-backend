@@ -1,36 +1,80 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import date, datetime, timezone
+
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
 from .database import Base
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 class User(Base):
     __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(255))
+    full_name: Mapped[str] = mapped_column(String(160))
+    role: Mapped[str] = mapped_column(String(40), default="analyst")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-    full_name = Column(String, nullable=False)
-    role = Column(String, default="Agronomist Analyst")
-    created_at = Column(DateTime, default=datetime.utcnow)
 
-class Product(Base):
-    __tablename__ = "products"
+class InventorySnapshot(Base):
+    __tablename__ = "inventory_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_code: Mapped[str] = mapped_column(String(40), index=True)
+    region_code: Mapped[str] = mapped_column(String(40), index=True)
+    quantity_kg: Mapped[float] = mapped_column(Float)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_reference: Mapped[str] = mapped_column(String(500))
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True, nullable=False)
-    category = Column(String, nullable=False)
-    region = Column(String, nullable=False)
-    latitude = Column(Float, nullable=False)
-    longitude = Column(Float, nullable=False)
 
-class DemandPrediction(Base):
-    __tablename__ = "demand_predictions"
+class DemandObservation(Base):
+    __tablename__ = "demand_observations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_code: Mapped[str] = mapped_column(String(40), index=True)
+    region_code: Mapped[str] = mapped_column(String(40), index=True)
+    observed_on: Mapped[date] = mapped_column(Date, index=True)
+    demand_kg: Mapped[float] = mapped_column(Float)
+    temperature_c: Mapped[float] = mapped_column(Float)
+    precipitation_mm: Mapped[float] = mapped_column(Float)
+    source_reference: Mapped[str] = mapped_column(String(500))
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
-    id = Column(Integer, primary_key=True, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
-    target_date = Column(DateTime, nullable=False)
-    predicted_demand_kg = Column(Float, nullable=False)
-    available_supply_kg = Column(Float, nullable=False)
-    gap_status = Column(String, nullable=False)
-    confidence_score = Column(Float, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+
+class ModelArtifact(Base):
+    __tablename__ = "model_artifacts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_code: Mapped[str] = mapped_column(String(40), index=True)
+    region_code: Mapped[str] = mapped_column(String(40), index=True)
+    version: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    training_rows: Mapped[int] = mapped_column(Integer)
+    mae_kg: Mapped[float] = mapped_column(Float)
+    r2_score: Mapped[float] = mapped_column(Float)
+    residual_p90_kg: Mapped[float] = mapped_column(Float)
+    artifact: Mapped[bytes] = mapped_column(LargeBinary)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class MatchingRun(Base):
+    __tablename__ = "matching_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_code: Mapped[str] = mapped_column(String(40), index=True)
+    region_code: Mapped[str] = mapped_column(String(40), index=True)
+    target_date: Mapped[date] = mapped_column(Date)
+    predicted_demand_kg: Mapped[float] = mapped_column(Float)
+    available_supply_kg: Mapped[float] = mapped_column(Float)
+    gap_kg: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(40))
+    confidence_score: Mapped[float] = mapped_column(Float)
+    model_version: Mapped[str] = mapped_column(String(64))
+    weather_source: Mapped[str] = mapped_column(String(120))
+    inventory_snapshot_id: Mapped[int] = mapped_column(ForeignKey("inventory_snapshots.id"))
+    requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    explanation: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
