@@ -1,187 +1,212 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy import desc, select, text
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from datetime import datetime, timedelta
-import httpx
-from . import models, database, ai_service, auth
 
-models.Base.metadata.create_all(bind=database.engine)
+from . import ai_service, auth, models, schemas
+from .catalog import PRODUCTS, REGIONS
+from .config import get_settings
+from .database import Base, engine, get_db
+from .weather import WeatherService
+
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
 
 app = FastAPI(
-    title="Forenode Global AI Enterprise Engine",
-    description="Enterprise Agricultural Logistics & Supply-Demand Matching Platform",
-    version="4.0.0"
+    title=settings.app_name,
+    version=settings.app_version,
+    description="Motor verificable de pronóstico y balance logístico agrícola.",
+    lifespan=lifespan,
 )
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    expose_headers=["X-Request-ID"],
+    max_age=600,
 )
 
-# Ruta raíz para evitar el 404 en Render y mantener el servicio activo
-@app.get("/")
-def read_root():
-    return {"status": "online", "message": "Forenode Global AI Enterprise Engine is running successfully."}
 
-class UserRegister(BaseModel):
-    email: str
-    password: str
-    full_name: str
+def require_catalog(product_code: str, region_code: str) -> None:
+    if product_code not in PRODUCTS:
+        raise HTTPException(status_code=422, detail="Producto no soportado.")
+    if region_code not in REGIONS:
+        raise HTTPException(status_code=422, detail="Nodo regional no soportado.")
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-    full_name: str
-    email: str
 
-class GlobalPredictionRequest(BaseModel):
-    product_id: int
-    product_name: str
-    region_name: str
-    latitude: float
-    longitude: float
-    target_date: datetime
-
-class MatchingResponse(BaseModel):
-    product_id: int
-    product_name: str
-    region_name: str
-    target_date: datetime
-    forecast_temperature_c: float
-    forecast_rainfall_mm: float
-    predicted_demand_kg: float
-    available_supply_kg: float
-    deficit_or_surplus_kg: float
-    market_status: str
-    confidence_score: float
-
-@app.post("/api/v1/auth/register", response_model=Token, status_code=status.HTTP_201_CREATED)
-def register_user(user_data: UserRegister, db: Session = Depends(database.get_db)):
-    existing_user = db.query(models.User).filter(models.User.email == user_data.email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    hashed_pwd = auth.get_password_hash(user_data.password)
-    new_user = models.User(
-        email=user_data.email,
-        hashed_password=hashed_pwd,
-        full_name=user_data.full_name
+def token_for(user: models.User) -> schemas.TokenResponse:
+    return schemas.TokenResponse(
+        access_token=auth.create_access_token(user.email),
+        expires_in=settings.access_token_expire_minutes * 60,
+        full_name=user.full_name,
+        email=user.email,
     )
-    db.add(new_user)
+
+
+@app.get("/", tags=["system"])
+def root() -> dict[str, str]:
+    return {"service": settings.app_name, "version": settings.app_version, "status": "online"}
+
+
+@app.get("/api/v1/health", tags=["system"])
+def health(db: Session = Depends(get_db)) -> dict[str, str]:
+    db.execute(text("SELECT 1"))
+    return {"status": "healthy", "database": "connected"}
+
+
+@app.get("/api/v1/catalog", response_model=schemas.CatalogResponse, tags=["catalog"])
+def catalog() -> schemas.CatalogResponse:
+    return schemas.CatalogResponse(
+        regions=[vars(item) for item in REGIONS.values()],
+        products=[vars(item) for item in PRODUCTS.values()],
+    )
+
+
+@app.post("/api/v1/auth/register", response_model=schemas.TokenResponse, status_code=201, tags=["auth"])
+def register(payload: schemas.UserRegister, db: Session = Depends(get_db)) -> schemas.TokenResponse:
+    email = payload.email.lower()
+    if db.scalar(select(models.User).where(models.User.email == email)):
+        raise HTTPException(status_code=409, detail="El correo ya está registrado.")
+    user = models.User(email=email, hashed_password=auth.get_password_hash(payload.password), full_name=payload.full_name.strip())
+    db.add(user)
     db.commit()
-    db.refresh(new_user)
+    db.refresh(user)
+    return token_for(user)
 
-    access_token = auth.create_access_token(
-        data={"sub": new_user.email}, expires_delta=timedelta(minutes=1440)
+
+@app.post("/api/v1/auth/login", response_model=schemas.TokenResponse, tags=["auth"])
+def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)) -> schemas.TokenResponse:
+    user = db.scalar(select(models.User).where(models.User.email == form.username.lower()))
+    if not user or not auth.verify_password(form.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Correo o contraseña incorrectos.", headers={"WWW-Authenticate": "Bearer"})
+    return token_for(user)
+
+
+@app.post("/api/v1/inventory", response_model=schemas.InventoryResponse, status_code=201, tags=["data"])
+def create_inventory(
+    payload: schemas.InventoryCreate,
+    user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+) -> models.InventorySnapshot:
+    require_catalog(payload.product_code, payload.region_code)
+    record = models.InventorySnapshot(**payload.model_dump(), created_by=user.id)
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+@app.post("/api/v1/demand-observations", status_code=201, tags=["data"])
+async def create_observation(
+    payload: schemas.DemandObservationCreate,
+    user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    require_catalog(payload.product_code, payload.region_code)
+    region = REGIONS[payload.region_code]
+    weather = await WeatherService().get_daily(region.latitude, region.longitude, payload.observed_on)
+    record = models.DemandObservation(
+        **payload.model_dump(),
+        temperature_c=weather.temperature_c,
+        precipitation_mm=weather.precipitation_mm,
+        created_by=user.id,
     )
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "full_name": new_user.full_name,
-        "email": new_user.email
-    }
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"id": record.id}
 
-@app.post("/api/v1/auth/login", response_model=Token)
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(database.get_db)):
-    user = db.query(models.User).filter(models.User.email == form_data.username).first()
-    if not user or not auth.verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    access_token = auth.create_access_token(
-        data={"sub": user.email}, expires_delta=timedelta(minutes=1440)
-    )
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "full_name": user.full_name,
-        "email": user.email
-    }
 
-@app.post("/api/v1/matching/engine", response_model=MatchingResponse)
-async def run_matching_engine(
-    request: GlobalPredictionRequest,
-    current_user: models.User = Depends(auth.get_current_user),
-    db: Session = Depends(database.get_db)
-):
+@app.post("/api/v1/models/train", response_model=schemas.ModelResponse, tags=["models"])
+def train(
+    payload: schemas.TrainingRequest,
+    _: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.ModelResponse:
+    require_catalog(payload.product_code, payload.region_code)
     try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={request.latitude}&longitude={request.longitude}&current=temperature_2m,precipitation"
-        async with httpx.AsyncClient() as client:
-            res = await client.get(url, timeout=5.0)
-            data = res.json() if res.status_code == 200 else {}
-            current = data.get("current", {})
-            temp = float(current.get("temperature_2m", 15.0))
-            rain = float(current.get("precipitation", 35.0))
+        artifact = ai_service.train_model(db, payload.product_code, payload.region_code)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return schemas.ModelResponse.model_validate(artifact, from_attributes=True)
 
-        month = request.target_date.month
-        base_predicted = ai_service.ai_model_instance.predict_demand(month=month, temp=temp, rain=rain)
-        
-        multiplier = 1.0
-        if request.product_id == 2:  # Papa Pastusa
-            multiplier = 2.4
-        elif request.product_id == 4:  # Quinoa
-            multiplier = 0.8
-        elif request.product_id == 3:  # Lulo
-            multiplier = 1.3
 
-        predicted_kg = round(base_predicted * multiplier, 2)
-        available_supply = round(950.0 + (request.product_id * 180.0) - (rain * 3.5), 2)
-        gap = round(predicted_kg - available_supply, 2)
-        
-        if gap > 150:
-            market_status = "Déficit Crítico (Riesgo de desabastecimiento regional)"
-        elif gap < -150:
-            market_status = "Superávit Alto (Riesgo de merma y desperdicio)"
-        else:
-            market_status = "Equilibrio Óptimo de Mercado"
-
-        confidence = round(0.96 - (abs(rain - 30) * 0.001), 2)
-        confidence = max(0.75, min(0.98, confidence))
-
-        product = db.query(models.Product).filter(models.Product.id == request.product_id).first()
-        if not product:
-            product = models.Product(
-                id=request.product_id,
-                name=request.product_name,
-                category="Enterprise Global Agro",
-                region=request.region_name,
-                latitude=request.latitude,
-                longitude=request.longitude
-            )
-            db.merge(product)
-            db.commit()
-
-        db_pred = models.DemandPrediction(
-            product_id=request.product_id,
-            target_date=request.target_date,
-            predicted_demand_kg=predicted_kg,
-            available_supply_kg=available_supply,
-            gap_status=market_status,
-            confidence_score=confidence
+@app.post("/api/v1/matching/engine", response_model=schemas.MatchingResponse, tags=["matching"])
+async def run_matching(
+    payload: schemas.MatchingRequest,
+    user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.MatchingResponse:
+    require_catalog(payload.product_code, payload.region_code)
+    region = REGIONS[payload.region_code]
+    product = PRODUCTS[payload.product_code]
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
+    inventory = db.scalar(
+        select(models.InventorySnapshot)
+        .where(
+            models.InventorySnapshot.product_code == payload.product_code,
+            models.InventorySnapshot.region_code == payload.region_code,
+            models.InventorySnapshot.recorded_at >= cutoff,
         )
-        db.add(db_pred)
-        db.commit()
-
-        return MatchingResponse(
-            product_id=request.product_id,
-            product_name=request.product_name,
-            region_name=request.region_name,
-            target_date=request.target_date,
-            forecast_temperature_c=temp,
-            forecast_rainfall_mm=rain,
-            predicted_demand_kg=predicted_kg,
-            available_supply_kg=available_supply,
-            deficit_or_surplus_kg=gap,
-            market_status=market_status,
-            confidence_score=confidence
+        .order_by(desc(models.InventorySnapshot.recorded_at))
+    )
+    if inventory is None:
+        raise HTTPException(status_code=409, detail="No hay un inventario real y vigente para esta combinación. Registra la oferta antes de ejecutar el motor.")
+    artifact = db.scalar(
+        select(models.ModelArtifact)
+        .where(
+            models.ModelArtifact.product_code == payload.product_code,
+            models.ModelArtifact.region_code == payload.region_code,
+            models.ModelArtifact.is_active.is_(True),
         )
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Global Engine Error: {str(e)}")
+        .order_by(desc(models.ModelArtifact.trained_at))
+    )
+    if artifact is None:
+        raise HTTPException(status_code=409, detail="No existe un modelo entrenado con observaciones reales para esta combinación.")
+    weather = await WeatherService().get_daily(region.latitude, region.longitude, payload.target_date)
+    prediction = ai_service.predict(artifact, payload.target_date.month, weather.temperature_c, weather.precipitation_mm)
+    gap = prediction.demand_kg - inventory.quantity_kg
+    ratio = gap / max(prediction.demand_kg, 1.0)
+    if ratio > 0.10:
+        market_status = "critical_deficit"
+        explanation = "La oferta vigente no cubre el límite central de demanda; se recomienda activar abastecimiento alterno."
+    elif ratio < -0.10:
+        market_status = "high_surplus"
+        explanation = "La oferta supera la demanda prevista; conviene priorizar redistribución y conservación."
+    else:
+        market_status = "balanced"
+        explanation = "La oferta está dentro de una banda del 10 % respecto de la demanda prevista."
+    run = models.MatchingRun(
+        product_code=payload.product_code, region_code=payload.region_code, target_date=payload.target_date,
+        predicted_demand_kg=prediction.demand_kg, available_supply_kg=inventory.quantity_kg, gap_kg=gap,
+        status=market_status, confidence_score=prediction.confidence, model_version=artifact.version,
+        weather_source=weather.source, inventory_snapshot_id=inventory.id, requested_by=user.id, explanation=explanation,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return schemas.MatchingResponse(
+        run_id=run.id, product_code=product.code, product_name=product.name,
+        region_code=region.code, region_name=region.name, target_date=payload.target_date,
+        weather=schemas.WeatherResponse(
+            temperature_c=round(weather.temperature_c, 1), precipitation_mm=round(weather.precipitation_mm, 1),
+            observed_or_forecast=weather.kind, source=weather.source,
+        ),
+        predicted_demand_kg=round(prediction.demand_kg, 2), demand_lower_kg=round(prediction.lower_kg, 2),
+        demand_upper_kg=round(prediction.upper_kg, 2), available_supply_kg=round(inventory.quantity_kg, 2),
+        inventory_recorded_at=inventory.recorded_at, inventory_source=inventory.source_reference,
+        gap_kg=round(gap, 2), market_status=market_status, confidence_score=round(prediction.confidence, 3),
+        model_version=artifact.version, model_mae_kg=round(artifact.mae_kg, 2), explanation=explanation,
+    )
