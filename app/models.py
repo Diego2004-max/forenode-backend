@@ -73,7 +73,7 @@ class MatchingRun(Base):
     status: Mapped[str] = mapped_column(String(40))
     confidence_score: Mapped[float] = mapped_column(Float)
     model_version: Mapped[str] = mapped_column(String(64))
-    weather_source: Mapped[str] = mapped_column(String(120))
+    weather_source: Mapped[str] = mapped_column(String(500))
     inventory_snapshot_id: Mapped[int] = mapped_column(ForeignKey("inventory_snapshots.id"))
     requested_by: Mapped[int] = mapped_column(ForeignKey("forenode_users.id"))
     explanation: Mapped[str] = mapped_column(Text)

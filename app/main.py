@@ -31,6 +31,10 @@ def migrate_legacy_user_foreign_keys() -> None:
         "matching_runs": "requested_by",
     }
     with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE IF EXISTS matching_runs "
+            "ALTER COLUMN weather_source TYPE VARCHAR(500)"
+        ))
         for table, column in targets.items():
             constraints = connection.execute(text("""
                 SELECT c.conname
