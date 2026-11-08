@@ -30,6 +30,13 @@ class RoleUpdate(BaseModel):
     role: str = Field(pattern="^(viewer|analyst|admin)$")
 
 
+class AdminUserCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=10, max_length=128)
+    full_name: str = Field(min_length=2, max_length=160)
+    role: str = Field(default="viewer", pattern="^(viewer|analyst|admin)$")
+
+
 class InventoryCreate(BaseModel):
     product_code: str
     region_code: str

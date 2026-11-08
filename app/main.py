@@ -134,6 +134,18 @@ def list_users(_: models.User = Depends(auth.require_role("admin")), db: Session
     return list(db.scalars(select(models.User).order_by(models.User.created_at)).all())
 
 
+@app.post("/api/v1/admin/users", response_model=schemas.UserResponse, status_code=201, tags=["admin"])
+def create_admin_user(payload: schemas.AdminUserCreate, _: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
+    email = payload.email.lower()
+    if db.scalar(select(models.User).where(models.User.email == email)):
+        raise HTTPException(status_code=409, detail="El correo ya está registrado.")
+    user = models.User(email=email, hashed_password=auth.get_password_hash(payload.password), full_name=payload.full_name.strip(), role=payload.role)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
 @app.patch("/api/v1/admin/users/{user_id}/role", response_model=schemas.UserResponse, tags=["admin"])
 def update_user_role(user_id: int, payload: schemas.RoleUpdate, _: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
     user = db.get(models.User, user_id)
