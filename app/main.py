@@ -378,20 +378,21 @@ async def run_matching(
         raise HTTPException(status_code=409, detail="No existe un modelo entrenado con observaciones reales para esta combinación.")
     weather = await WeatherService().get_daily(region.latitude, region.longitude, payload.target_date)
     prediction = ai_service.predict(artifact, payload.target_date.month, weather.temperature_c, weather.precipitation_mm)
-    gap = prediction.demand_kg - inventory.quantity_kg
+    evaluated_supply_kg = payload.evaluated_supply_kg
+    gap = prediction.demand_kg - evaluated_supply_kg
     ratio = gap / max(prediction.demand_kg, 1.0)
     if ratio > 0.10:
         market_status = "critical_deficit"
-        explanation = "La oferta vigente no cubre el límite central de demanda; se recomienda activar abastecimiento alterno."
+        explanation = "La cantidad evaluada no cubre la demanda prevista; se recomienda activar abastecimiento alterno."
     elif ratio < -0.10:
         market_status = "high_surplus"
-        explanation = "La oferta supera la demanda prevista; conviene priorizar redistribución y conservación."
+        explanation = "La cantidad evaluada supera la demanda prevista; conviene priorizar redistribución y conservación."
     else:
         market_status = "balanced"
-        explanation = "La oferta está dentro de una banda del 10 % respecto de la demanda prevista."
+        explanation = "La cantidad evaluada está dentro de una banda del 10 % respecto de la demanda prevista."
     run = models.MatchingRun(
         product_code=payload.product_code, region_code=payload.region_code, target_date=payload.target_date,
-        predicted_demand_kg=prediction.demand_kg, available_supply_kg=inventory.quantity_kg, gap_kg=gap,
+        predicted_demand_kg=prediction.demand_kg, available_supply_kg=evaluated_supply_kg, gap_kg=gap,
         status=market_status, confidence_score=prediction.confidence, model_version=artifact.version,
         weather_source=weather.source, inventory_snapshot_id=inventory.id, requested_by=user.id, explanation=explanation,
     )
@@ -406,7 +407,7 @@ async def run_matching(
             observed_or_forecast=weather.kind, source=weather.source,
         ),
         predicted_demand_kg=round(prediction.demand_kg, 2), demand_lower_kg=round(prediction.lower_kg, 2),
-        demand_upper_kg=round(prediction.upper_kg, 2), available_supply_kg=round(inventory.quantity_kg, 2),
+        demand_upper_kg=round(prediction.upper_kg, 2), available_supply_kg=round(evaluated_supply_kg, 2),
         inventory_recorded_at=inventory.recorded_at, inventory_source=inventory.source_reference,
         gap_kg=round(gap, 2), market_status=market_status, confidence_score=round(prediction.confidence, 3),
         model_version=artifact.version, model_mae_kg=round(artifact.mae_kg, 2), explanation=explanation,

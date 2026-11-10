@@ -107,6 +107,7 @@ class MatchingRequest(BaseModel):
     product_code: str
     region_code: str
     target_date: date
+    evaluated_supply_kg: float = Field(gt=0, description="Cantidad que la persona desea comparar con la demanda prevista.")
 
 
 class MatchingReadiness(BaseModel):
