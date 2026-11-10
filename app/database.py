@@ -11,7 +11,16 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
-engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=300)
+
+# Supabase exposes PostgreSQL through PgBouncer in transaction-pooling mode.
+# Server-side prepared statements are connection-specific there, so Psycopg
+# must not cache them across transactions.
+engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    connect_args={"prepare_threshold": None},
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
