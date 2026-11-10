@@ -83,21 +83,13 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(
+api = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="Motor verificable de pronóstico y balance logístico agrícola.",
     lifespan=lifespan,
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(dict.fromkeys([origin.rstrip("/") for origin in settings.cors_origins] + ["https://forenode-frontend.vercel.app"])),
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-    expose_headers=["X-Request-ID"],
-    max_age=600,
-)
+
 
 
 def require_catalog(product_code: str, region_code: str, db: Session | None = None) -> None:
@@ -125,18 +117,18 @@ def token_for(user: models.User) -> schemas.TokenResponse:
     )
 
 
-@app.get("/", tags=["system"])
+@api.get("/", tags=["system"])
 def root() -> dict[str, str]:
     return {"service": settings.app_name, "version": settings.app_version, "status": "online"}
 
 
-@app.get("/api/v1/health", tags=["system"])
+@api.get("/api/v1/health", tags=["system"])
 def health(db: Session = Depends(get_db)) -> dict[str, str]:
     db.execute(text("SELECT 1"))
     return {"status": "healthy", "database": "connected"}
 
 
-@app.get("/api/v1/catalog", response_model=schemas.CatalogResponse, tags=["catalog"])
+@api.get("/api/v1/catalog", response_model=schemas.CatalogResponse, tags=["catalog"])
 def catalog(db: Session = Depends(get_db)) -> schemas.CatalogResponse:
     return schemas.CatalogResponse(
         regions=[{"code": node.code, "name": node.name, "latitude": node.latitude, "longitude": node.longitude} for node in db.scalars(select(models.RegionNode).where(models.RegionNode.is_active.is_(True)).order_by(models.RegionNode.name)).all()],
@@ -144,12 +136,12 @@ def catalog(db: Session = Depends(get_db)) -> schemas.CatalogResponse:
     )
 
 
-@app.get("/api/v1/auth/me", response_model=schemas.UserResponse, tags=["auth"])
+@api.get("/api/v1/auth/me", response_model=schemas.UserResponse, tags=["auth"])
 def current_profile(user: models.User = Depends(auth.get_current_user)) -> models.User:
     return user
 
 
-@app.post("/api/v1/auth/register", response_model=schemas.TokenResponse, status_code=201, tags=["auth"])
+@api.post("/api/v1/auth/register", response_model=schemas.TokenResponse, status_code=201, tags=["auth"])
 def register(payload: schemas.UserRegister, db: Session = Depends(get_db)) -> schemas.TokenResponse:
     email = payload.email.lower()
     if db.scalar(select(models.User).where(models.User.email == email)):
@@ -161,12 +153,12 @@ def register(payload: schemas.UserRegister, db: Session = Depends(get_db)) -> sc
     return token_for(user)
 
 
-@app.get("/api/v1/admin/users", response_model=list[schemas.UserResponse], tags=["admin"])
+@api.get("/api/v1/admin/users", response_model=list[schemas.UserResponse], tags=["admin"])
 def list_users(_: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> list[models.User]:
     return list(db.scalars(select(models.User).order_by(models.User.created_at)).all())
 
 
-@app.post("/api/v1/admin/users", response_model=schemas.UserResponse, status_code=201, tags=["admin"])
+@api.post("/api/v1/admin/users", response_model=schemas.UserResponse, status_code=201, tags=["admin"])
 def create_admin_user(payload: schemas.AdminUserCreate, _: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
     raise HTTPException(status_code=410, detail="Las cuentas se crean desde registro; el panel administrativo no define contraseñas.")
     email = payload.email.lower()
@@ -179,7 +171,7 @@ def create_admin_user(payload: schemas.AdminUserCreate, _: models.User = Depends
     return user
 
 
-@app.patch("/api/v1/admin/users/{user_id}/role", response_model=schemas.UserResponse, tags=["admin"])
+@api.patch("/api/v1/admin/users/{user_id}/role", response_model=schemas.UserResponse, tags=["admin"])
 def update_user_role(user_id: int, payload: schemas.RoleUpdate, current: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
     user = db.get(models.User, user_id)
     if user is None:
@@ -192,7 +184,7 @@ def update_user_role(user_id: int, payload: schemas.RoleUpdate, current: models.
     return user
 
 
-@app.delete("/api/v1/admin/users/{user_id}", status_code=204, tags=["admin"])
+@api.delete("/api/v1/admin/users/{user_id}", status_code=204, tags=["admin"])
 def delete_user(user_id: int, current: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> None:
     user = db.get(models.User, user_id)
     if user is None:
@@ -205,7 +197,7 @@ def delete_user(user_id: int, current: models.User = Depends(auth.require_role("
     db.commit()
 
 
-@app.patch("/api/v1/admin/users/{user_id}/status", response_model=schemas.UserResponse, tags=["admin"])
+@api.patch("/api/v1/admin/users/{user_id}/status", response_model=schemas.UserResponse, tags=["admin"])
 def update_user_status(user_id: int, payload: schemas.AccountStatusUpdate, current: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
     user = db.get(models.User, user_id)
     if user is None:
@@ -218,7 +210,7 @@ def update_user_status(user_id: int, payload: schemas.AccountStatusUpdate, curre
     return user
 
 
-@app.patch("/api/v1/admin/users/{user_id}", response_model=schemas.UserResponse, tags=["admin"])
+@api.patch("/api/v1/admin/users/{user_id}", response_model=schemas.UserResponse, tags=["admin"])
 def update_user_profile(user_id: int, payload: schemas.UserProfileUpdate, _: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
     user = db.get(models.User, user_id)
     if user is None:
@@ -234,12 +226,12 @@ def update_user_profile(user_id: int, payload: schemas.UserProfileUpdate, _: mod
     return user
 
 
-@app.get("/api/v1/admin/nodes", response_model=list[schemas.RegionNodeResponse], tags=["admin"])
+@api.get("/api/v1/admin/nodes", response_model=list[schemas.RegionNodeResponse], tags=["admin"])
 def list_nodes(_: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> list[models.RegionNode]:
     return list(db.scalars(select(models.RegionNode).order_by(models.RegionNode.name)).all())
 
 
-@app.post("/api/v1/admin/nodes", response_model=schemas.RegionNodeResponse, status_code=201, tags=["admin"])
+@api.post("/api/v1/admin/nodes", response_model=schemas.RegionNodeResponse, status_code=201, tags=["admin"])
 def create_node(payload: schemas.RegionNodeCreate, _: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> models.RegionNode:
     if db.scalar(select(models.RegionNode.id).where(models.RegionNode.code == payload.code)) is not None:
         raise HTTPException(status_code=409, detail="Ya existe un nodo con ese código.")
@@ -250,7 +242,7 @@ def create_node(payload: schemas.RegionNodeCreate, _: models.User = Depends(auth
     return node
 
 
-@app.patch("/api/v1/admin/nodes/{node_id}", response_model=schemas.RegionNodeResponse, tags=["admin"])
+@api.patch("/api/v1/admin/nodes/{node_id}", response_model=schemas.RegionNodeResponse, tags=["admin"])
 def update_node(node_id: int, payload: schemas.RegionNodeUpdate, _: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> models.RegionNode:
     node = db.get(models.RegionNode, node_id)
     if node is None:
@@ -264,7 +256,7 @@ def update_node(node_id: int, payload: schemas.RegionNodeUpdate, _: models.User 
     return node
 
 
-@app.post("/api/v1/auth/login", response_model=schemas.TokenResponse, tags=["auth"])
+@api.post("/api/v1/auth/login", response_model=schemas.TokenResponse, tags=["auth"])
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)) -> schemas.TokenResponse:
     user = db.scalar(select(models.User).where(models.User.email == form.username.lower()))
     if not user or not user.is_active or not auth.verify_password(form.password, user.hashed_password):
@@ -272,7 +264,7 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
     return token_for(user)
 
 
-@app.post("/api/v1/inventory", response_model=schemas.InventoryResponse, status_code=201, tags=["data"])
+@api.post("/api/v1/inventory", response_model=schemas.InventoryResponse, status_code=201, tags=["data"])
 def create_inventory(
     payload: schemas.InventoryCreate,
     user: models.User = Depends(auth.require_role("admin", "analyst")),
@@ -288,7 +280,7 @@ def create_inventory(
     return record
 
 
-@app.post("/api/v1/demand-observations", status_code=201, tags=["data"])
+@api.post("/api/v1/demand-observations", status_code=201, tags=["data"])
 async def create_observation(
     payload: schemas.DemandObservationCreate,
     user: models.User = Depends(auth.require_role("admin", "analyst")),
@@ -309,7 +301,7 @@ async def create_observation(
     return {"id": record.id}
 
 
-@app.post("/api/v1/models/train", response_model=schemas.ModelResponse, tags=["models"])
+@api.post("/api/v1/models/train", response_model=schemas.ModelResponse, tags=["models"])
 def train(
     payload: schemas.TrainingRequest,
     _: models.User = Depends(auth.require_role("admin", "analyst")),
@@ -323,13 +315,13 @@ def train(
     return schemas.ModelResponse.model_validate(artifact, from_attributes=True)
 
 
-@app.get("/api/v1/models", response_model=list[schemas.ModelResponse], tags=["models"])
+@api.get("/api/v1/models", response_model=list[schemas.ModelResponse], tags=["models"])
 def list_models(_: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> list[schemas.ModelResponse]:
     artifacts = db.scalars(select(models.ModelArtifact).where(models.ModelArtifact.is_active.is_(True)).order_by(desc(models.ModelArtifact.trained_at))).all()
     return [schemas.ModelResponse.model_validate(item, from_attributes=True) for item in artifacts]
 
 
-@app.get("/api/v1/models/coverage", response_model=schemas.ObservationCoverage, tags=["models"])
+@api.get("/api/v1/models/coverage", response_model=schemas.ObservationCoverage, tags=["models"])
 def model_coverage(product_code: str, region_code: str, _: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> schemas.ObservationCoverage:
     require_catalog(product_code, region_code, db)
     count = db.scalar(select(func.count(models.DemandObservation.id)).where(
@@ -340,7 +332,7 @@ def model_coverage(product_code: str, region_code: str, _: models.User = Depends
     return schemas.ObservationCoverage(product_code=product_code, region_code=region_code, valid_observations=count, minimum_required=ai_service.MINIMUM_TRAINING_ROWS)
 
 
-@app.post("/api/v1/matching/engine", response_model=schemas.MatchingResponse, tags=["matching"])
+@api.post("/api/v1/matching/engine", response_model=schemas.MatchingResponse, tags=["matching"])
 async def run_matching(
     payload: schemas.MatchingRequest,
     user: models.User = Depends(auth.get_current_user),
@@ -411,7 +403,7 @@ async def run_matching(
     )
 
 
-@app.get("/api/v1/matching/readiness", response_model=schemas.MatchingReadiness, tags=["matching"])
+@api.get("/api/v1/matching/readiness", response_model=schemas.MatchingReadiness, tags=["matching"])
 def matching_readiness(
     product_code: str,
     region_code: str,
@@ -435,7 +427,7 @@ def matching_readiness(
     return schemas.MatchingReadiness(has_inventory=has_inventory, has_model=has_model, can_run=has_inventory and has_model)
 
 
-@app.get("/api/v1/matching/availability", response_model=list[schemas.ScenarioAvailability], tags=["matching"])
+@api.get("/api/v1/matching/availability", response_model=list[schemas.ScenarioAvailability], tags=["matching"])
 def matching_availability(user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)) -> list[schemas.ScenarioAvailability]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
     active_models = {(product, region) for product, region in db.execute(select(models.ModelArtifact.product_code, models.ModelArtifact.region_code).where(models.ModelArtifact.is_active.is_(True))).all()}
@@ -444,3 +436,15 @@ def matching_availability(user: models.User = Depends(auth.get_current_user), db
         schemas.ScenarioAvailability(product_code=product, region_code=region, available=(product, region) in stocked)
         for product, region in sorted(active_models)
     ]
+
+# Wrap the complete ASGI application so CORS headers also reach unhandled
+# exceptions converted to 500 responses by Starlette's server error layer.
+app = CORSMiddleware(
+    api,
+    allow_origins=list(dict.fromkeys([origin.rstrip("/") for origin in settings.cors_origins] + ["https://forenode-frontend.vercel.app"])),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    expose_headers=["X-Request-ID"],
+    max_age=600,
+)
