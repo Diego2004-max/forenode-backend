@@ -1,16 +1,16 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import desc, select, text
+from sqlalchemy import desc, inspect, select, text
 from sqlalchemy.orm import Session
 
 from . import ai_service, auth, models, schemas
 from .catalog import PRODUCTS, REGIONS
 from .config import get_settings
-from .database import Base, engine, get_db
+from .database import Base, SessionLocal, engine, get_db
 from .weather import WeatherService
 
 settings = get_settings()
@@ -55,6 +55,25 @@ def migrate_legacy_user_foreign_keys() -> None:
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     migrate_legacy_user_foreign_keys()
+    inspector = inspect(engine)
+    user_columns = {column["name"] for column in inspector.get_columns("forenode_users")}
+    observation_columns = {column["name"] for column in inspector.get_columns("demand_observations")}
+    with engine.begin() as connection:
+        if "is_active" not in user_columns:
+            connection.execute(text("ALTER TABLE forenode_users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE"))
+        if "is_valid" not in observation_columns:
+            connection.execute(text("ALTER TABLE demand_observations ADD COLUMN is_valid BOOLEAN NOT NULL DEFAULT TRUE"))
+    with SessionLocal() as db:
+        for region in REGIONS.values():
+            if db.scalar(select(models.RegionNode.id).where(models.RegionNode.code == region.code)) is None:
+                db.add(models.RegionNode(code=region.code, name=region.name, latitude=region.latitude, longitude=region.longitude, is_active=True))
+        db.commit()
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            sample_rows = [(date(2025, 12, 1), 720), (date(2026, 1, 1), 760), (date(2026, 2, 1), 810), (date(2026, 3, 1), 790), (date(2026, 4, 1), 850), (date(2026, 5, 1), 900), (date(2026, 6, 1), 940), (date(2026, 7, 1), 980), (date(2026, 8, 1), 930), (date(2026, 9, 1), 890), (date(2026, 10, 1), 950), (date(2026, 11, 1), 1020)]
+            for observed_on, demand_kg in sample_rows:
+                connection.execute(text("UPDATE demand_observations SET is_valid = FALSE WHERE product_code = 'papa-pastusa' AND region_code = 'pasto' AND observed_on = :observed_on AND demand_kg = :demand_kg AND source_reference = 'Registro historico de comercializacion'"), {"observed_on": observed_on, "demand_kg": demand_kg})
+            connection.execute(text("UPDATE model_artifacts SET is_active = FALSE WHERE version = '20261107T233418Z-papa-pastusa-pasto'"))
     if settings.admin_email:
         with engine.begin() as connection:
             connection.execute(
@@ -74,18 +93,26 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
     expose_headers=["X-Request-ID"],
     max_age=600,
 )
 
 
-def require_catalog(product_code: str, region_code: str) -> None:
+def require_catalog(product_code: str, region_code: str, db: Session | None = None) -> None:
     if product_code not in PRODUCTS:
         raise HTTPException(status_code=422, detail="Producto no soportado.")
-    if region_code not in REGIONS:
+    node_exists = region_code in REGIONS if db is None else db.scalar(select(models.RegionNode.id).where(models.RegionNode.code == region_code, models.RegionNode.is_active.is_(True))) is not None
+    if not node_exists:
         raise HTTPException(status_code=422, detail="Nodo regional no soportado.")
+
+
+def get_region(db: Session, region_code: str):
+    node = db.scalar(select(models.RegionNode).where(models.RegionNode.code == region_code, models.RegionNode.is_active.is_(True)))
+    if node is None:
+        raise HTTPException(status_code=422, detail="Nodo regional no disponible.")
+    return node
 
 
 def token_for(user: models.User) -> schemas.TokenResponse:
@@ -110,11 +137,16 @@ def health(db: Session = Depends(get_db)) -> dict[str, str]:
 
 
 @app.get("/api/v1/catalog", response_model=schemas.CatalogResponse, tags=["catalog"])
-def catalog() -> schemas.CatalogResponse:
+def catalog(db: Session = Depends(get_db)) -> schemas.CatalogResponse:
     return schemas.CatalogResponse(
-        regions=[vars(item) for item in REGIONS.values()],
+        regions=[{"code": node.code, "name": node.name, "latitude": node.latitude, "longitude": node.longitude} for node in db.scalars(select(models.RegionNode).where(models.RegionNode.is_active.is_(True)).order_by(models.RegionNode.name)).all()],
         products=[vars(item) for item in PRODUCTS.values()],
     )
+
+
+@app.get("/api/v1/auth/me", response_model=schemas.UserResponse, tags=["auth"])
+def current_profile(user: models.User = Depends(auth.get_current_user)) -> models.User:
+    return user
 
 
 @app.post("/api/v1/auth/register", response_model=schemas.TokenResponse, status_code=201, tags=["auth"])
@@ -136,6 +168,7 @@ def list_users(_: models.User = Depends(auth.require_role("admin")), db: Session
 
 @app.post("/api/v1/admin/users", response_model=schemas.UserResponse, status_code=201, tags=["admin"])
 def create_admin_user(payload: schemas.AdminUserCreate, _: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
+    raise HTTPException(status_code=410, detail="Las cuentas se crean desde registro; el panel administrativo no define contraseñas.")
     email = payload.email.lower()
     if db.scalar(select(models.User).where(models.User.email == email)):
         raise HTTPException(status_code=409, detail="El correo ya está registrado.")
@@ -147,20 +180,94 @@ def create_admin_user(payload: schemas.AdminUserCreate, _: models.User = Depends
 
 
 @app.patch("/api/v1/admin/users/{user_id}/role", response_model=schemas.UserResponse, tags=["admin"])
-def update_user_role(user_id: int, payload: schemas.RoleUpdate, _: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
+def update_user_role(user_id: int, payload: schemas.RoleUpdate, current: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
     user = db.get(models.User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    if user.role == "admin" and payload.role != "admin" and db.scalar(select(models.User.id).where(models.User.role == "admin", models.User.is_active.is_(True), models.User.id != user.id)) is None:
+        raise HTTPException(status_code=409, detail="Debe permanecer al menos un administrador activo.")
     user.role = payload.role
     db.commit()
     db.refresh(user)
     return user
 
 
+@app.delete("/api/v1/admin/users/{user_id}", status_code=204, tags=["admin"])
+def delete_user(user_id: int, current: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> None:
+    user = db.get(models.User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    if user.id == current.id:
+        raise HTTPException(status_code=409, detail="No puedes eliminar tu propia cuenta administradora.")
+    if user.role == "admin" and db.scalar(select(models.User.id).where(models.User.role == "admin", models.User.id != user.id)) is None:
+        raise HTTPException(status_code=409, detail="No se puede eliminar al último administrador.")
+    user.is_active = False
+    db.commit()
+
+
+@app.patch("/api/v1/admin/users/{user_id}/status", response_model=schemas.UserResponse, tags=["admin"])
+def update_user_status(user_id: int, payload: schemas.AccountStatusUpdate, current: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
+    user = db.get(models.User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    if user.id == current.id and not payload.is_active:
+        raise HTTPException(status_code=409, detail="No puedes desactivar tu propia cuenta.")
+    user.is_active = payload.is_active
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.patch("/api/v1/admin/users/{user_id}", response_model=schemas.UserResponse, tags=["admin"])
+def update_user_profile(user_id: int, payload: schemas.UserProfileUpdate, _: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> models.User:
+    user = db.get(models.User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    email = payload.email.lower()
+    duplicate = db.scalar(select(models.User.id).where(models.User.email == email, models.User.id != user_id))
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="Ese correo ya pertenece a otra cuenta.")
+    user.email = email
+    user.full_name = payload.full_name.strip()
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.get("/api/v1/admin/nodes", response_model=list[schemas.RegionNodeResponse], tags=["admin"])
+def list_nodes(_: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> list[models.RegionNode]:
+    return list(db.scalars(select(models.RegionNode).order_by(models.RegionNode.name)).all())
+
+
+@app.post("/api/v1/admin/nodes", response_model=schemas.RegionNodeResponse, status_code=201, tags=["admin"])
+def create_node(payload: schemas.RegionNodeCreate, _: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> models.RegionNode:
+    if db.scalar(select(models.RegionNode.id).where(models.RegionNode.code == payload.code)) is not None:
+        raise HTTPException(status_code=409, detail="Ya existe un nodo con ese código.")
+    node = models.RegionNode(**payload.model_dump(), is_active=True)
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    return node
+
+
+@app.patch("/api/v1/admin/nodes/{node_id}", response_model=schemas.RegionNodeResponse, tags=["admin"])
+def update_node(node_id: int, payload: schemas.RegionNodeUpdate, _: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> models.RegionNode:
+    node = db.get(models.RegionNode, node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Nodo no encontrado.")
+    node.name = payload.name.strip()
+    node.latitude = payload.latitude
+    node.longitude = payload.longitude
+    node.is_active = payload.is_active
+    db.commit()
+    db.refresh(node)
+    return node
+
+
 @app.post("/api/v1/auth/login", response_model=schemas.TokenResponse, tags=["auth"])
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)) -> schemas.TokenResponse:
     user = db.scalar(select(models.User).where(models.User.email == form.username.lower()))
-    if not user or not auth.verify_password(form.password, user.hashed_password):
+    if not user or not user.is_active or not auth.verify_password(form.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Correo o contraseña incorrectos.", headers={"WWW-Authenticate": "Bearer"})
     return token_for(user)
 
@@ -171,7 +278,9 @@ def create_inventory(
     user: models.User = Depends(auth.get_current_user),
     db: Session = Depends(get_db),
 ) -> models.InventorySnapshot:
-    require_catalog(payload.product_code, payload.region_code)
+    require_catalog(payload.product_code, payload.region_code, db)
+    if user.role == "viewer" and payload.quantity_kg <= 0:
+        raise HTTPException(status_code=422, detail="Ingresa una cantidad disponible mayor que cero.")
     record = models.InventorySnapshot(**payload.model_dump(), created_by=user.id)
     db.add(record)
     db.commit()
@@ -182,11 +291,11 @@ def create_inventory(
 @app.post("/api/v1/demand-observations", status_code=201, tags=["data"])
 async def create_observation(
     payload: schemas.DemandObservationCreate,
-    user: models.User = Depends(auth.get_current_user),
+    user: models.User = Depends(auth.require_role("admin", "analyst")),
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
-    require_catalog(payload.product_code, payload.region_code)
-    region = REGIONS[payload.region_code]
+    require_catalog(payload.product_code, payload.region_code, db)
+    region = get_region(db, payload.region_code)
     weather = await WeatherService().get_daily(region.latitude, region.longitude, payload.observed_on)
     record = models.DemandObservation(
         **payload.model_dump(),
@@ -203,15 +312,21 @@ async def create_observation(
 @app.post("/api/v1/models/train", response_model=schemas.ModelResponse, tags=["models"])
 def train(
     payload: schemas.TrainingRequest,
-    _: models.User = Depends(auth.get_current_user),
+    _: models.User = Depends(auth.require_role("admin", "analyst")),
     db: Session = Depends(get_db),
 ) -> schemas.ModelResponse:
-    require_catalog(payload.product_code, payload.region_code)
+    require_catalog(payload.product_code, payload.region_code, db)
     try:
         artifact = ai_service.train_model(db, payload.product_code, payload.region_code)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return schemas.ModelResponse.model_validate(artifact, from_attributes=True)
+
+
+@app.get("/api/v1/models", response_model=list[schemas.ModelResponse], tags=["models"])
+def list_models(_: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> list[schemas.ModelResponse]:
+    artifacts = db.scalars(select(models.ModelArtifact).where(models.ModelArtifact.is_active.is_(True)).order_by(desc(models.ModelArtifact.trained_at))).all()
+    return [schemas.ModelResponse.model_validate(item, from_attributes=True) for item in artifacts]
 
 
 @app.post("/api/v1/matching/engine", response_model=schemas.MatchingResponse, tags=["matching"])
@@ -220,13 +335,14 @@ async def run_matching(
     user: models.User = Depends(auth.get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.MatchingResponse:
-    require_catalog(payload.product_code, payload.region_code)
-    region = REGIONS[payload.region_code]
+    require_catalog(payload.product_code, payload.region_code, db)
+    region = get_region(db, payload.region_code)
     product = PRODUCTS[payload.product_code]
     cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
     inventory_query = select(models.InventorySnapshot).where(
         models.InventorySnapshot.product_code == payload.product_code,
         models.InventorySnapshot.region_code == payload.region_code,
+        models.InventorySnapshot.quantity_kg > 0,
         models.InventorySnapshot.recorded_at >= cutoff,
     )
     if user.role == "viewer":
@@ -236,7 +352,8 @@ async def run_matching(
         .order_by(desc(models.InventorySnapshot.recorded_at))
     )
     if inventory is None:
-        raise HTTPException(status_code=409, detail="No hay un inventario real y vigente para esta combinación. Registra la oferta antes de ejecutar el motor.")
+        message = "Registra primero tu oferta para este producto y nodo; el análisis no se ejecutó ni generó una predicción." if user.role == "viewer" else "No hay un inventario real y vigente para esta combinación. Registra la oferta antes de ejecutar el motor."
+        raise HTTPException(status_code=409, detail=message)
     artifact = db.scalar(
         select(models.ModelArtifact)
         .where(
@@ -283,3 +400,29 @@ async def run_matching(
         gap_kg=round(gap, 2), market_status=market_status, confidence_score=round(prediction.confidence, 3),
         model_version=artifact.version, model_mae_kg=round(artifact.mae_kg, 2), explanation=explanation,
     )
+
+
+@app.get("/api/v1/matching/readiness", response_model=schemas.MatchingReadiness, tags=["matching"])
+def matching_readiness(
+    product_code: str,
+    region_code: str,
+    user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.MatchingReadiness:
+    require_catalog(product_code, region_code, db)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
+    inventory_query = select(models.InventorySnapshot.id).where(
+        models.InventorySnapshot.product_code == product_code,
+        models.InventorySnapshot.region_code == region_code,
+        models.InventorySnapshot.quantity_kg > 0,
+        models.InventorySnapshot.recorded_at >= cutoff,
+    )
+    if user.role == "viewer":
+        inventory_query = inventory_query.where(models.InventorySnapshot.created_by == user.id)
+    has_inventory = db.scalar(inventory_query.limit(1)) is not None
+    has_model = db.scalar(select(models.ModelArtifact.id).where(
+        models.ModelArtifact.product_code == product_code,
+        models.ModelArtifact.region_code == region_code,
+        models.ModelArtifact.is_active.is_(True),
+    ).limit(1)) is not None
+    return schemas.MatchingReadiness(has_inventory=has_inventory, has_model=has_model, can_run=has_inventory and has_model)

@@ -57,8 +57,9 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     )
     try:
         payload = decode_access_token(token)
-        email = payload.get("sub")
-        if not isinstance(email, str):
+        subject = payload.get("sub")
+        email = payload.get("email") or (subject if isinstance(subject, str) and "@" in subject else None)
+        if not isinstance(email, str) or "@" not in email:
             raise unauthorized
     except jwt.PyJWTError as exc:
         raise unauthorized from exc
@@ -70,11 +71,13 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             email=email.lower(),
             full_name=str(full_name)[:160],
             hashed_password=get_password_hash(token_urlsafe(32)),
-            role="analyst",
+            role="viewer",
         )
         db.add(user)
         db.commit()
         db.refresh(user)
+    if not user.is_active:
+        raise unauthorized
     return user
 
 

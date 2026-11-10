@@ -24,10 +24,40 @@ class UserResponse(BaseModel):
     email: EmailStr
     full_name: str
     role: str
+    is_active: bool = True
 
 
 class RoleUpdate(BaseModel):
     role: str = Field(pattern="^(viewer|analyst|admin)$")
+
+
+class AccountStatusUpdate(BaseModel):
+    is_active: bool
+
+
+class UserProfileUpdate(BaseModel):
+    full_name: str = Field(min_length=2, max_length=160)
+    email: EmailStr
+
+
+class RegionNodeCreate(BaseModel):
+    code: str = Field(pattern="^[a-z0-9-]{2,40}$")
+    name: str = Field(min_length=2, max_length=120)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+
+
+class RegionNodeUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    is_active: bool
+
+
+class RegionNodeResponse(RegionNodeCreate):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    is_active: bool
 
 
 class AdminUserCreate(BaseModel):
@@ -77,6 +107,12 @@ class MatchingRequest(BaseModel):
     product_code: str
     region_code: str
     target_date: date
+
+
+class MatchingReadiness(BaseModel):
+    has_inventory: bool
+    has_model: bool
+    can_run: bool
 
 
 class WeatherResponse(BaseModel):

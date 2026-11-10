@@ -33,7 +33,7 @@ class Prediction:
 def train_model(db: Session, product_code: str, region_code: str) -> models.ModelArtifact:
     observations = db.scalars(
         select(models.DemandObservation)
-        .where(models.DemandObservation.product_code == product_code, models.DemandObservation.region_code == region_code)
+        .where(models.DemandObservation.product_code == product_code, models.DemandObservation.region_code == region_code, models.DemandObservation.is_valid.is_(True))
         .order_by(models.DemandObservation.observed_on)
     ).all()
     if len(observations) < MINIMUM_TRAINING_ROWS:
