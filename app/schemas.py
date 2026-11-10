@@ -21,7 +21,9 @@ class TokenResponse(BaseModel):
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
-    email: EmailStr
+    # OAuth providers may have legacy identity records; registration and
+    # profile changes still validate EmailStr at their input boundaries.
+    email: str
     full_name: str
     role: str
     is_active: bool = True

@@ -208,8 +208,26 @@ def register(payload: schemas.UserRegister, db: Session = Depends(get_db)) -> sc
 
 
 @api.get("/api/v1/admin/users", response_model=list[schemas.UserResponse], tags=["admin"])
-def list_users(_: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> list[models.User]:
-    return list(db.scalars(select(models.User).order_by(models.User.created_at)).all())
+def list_users(_: models.User = Depends(auth.require_role("admin")), db: Session = Depends(get_db)) -> list[schemas.UserResponse]:
+    """Return a safe projection even when a legacy identity record is incomplete."""
+    rows = db.execute(select(
+        models.User.id,
+        models.User.email,
+        models.User.full_name,
+        models.User.role,
+        models.User.is_active,
+    ).order_by(models.User.id)).all()
+    allowed_roles = {"viewer", "analyst", "admin"}
+    return [
+        schemas.UserResponse(
+            id=row.id,
+            email=str(row.email or "Sin correo"),
+            full_name=str(row.full_name or "Usuario sin nombre"),
+            role=row.role if row.role in allowed_roles else "viewer",
+            is_active=True if row.is_active is None else bool(row.is_active),
+        )
+        for row in rows
+    ]
 
 
 @api.post("/api/v1/admin/users", response_model=schemas.UserResponse, status_code=201, tags=["admin"])
