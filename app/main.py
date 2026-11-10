@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import desc, inspect, select, text
+from sqlalchemy import desc, func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from . import ai_service, auth, models, schemas
@@ -91,7 +91,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=list(dict.fromkeys([origin.rstrip("/") for origin in settings.cors_origins] + ["https://forenode-frontend.vercel.app"])),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
@@ -275,12 +275,12 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 @app.post("/api/v1/inventory", response_model=schemas.InventoryResponse, status_code=201, tags=["data"])
 def create_inventory(
     payload: schemas.InventoryCreate,
-    user: models.User = Depends(auth.get_current_user),
+    user: models.User = Depends(auth.require_role("admin", "analyst")),
     db: Session = Depends(get_db),
 ) -> models.InventorySnapshot:
     require_catalog(payload.product_code, payload.region_code, db)
-    if user.role == "viewer" and payload.quantity_kg <= 0:
-        raise HTTPException(status_code=422, detail="Ingresa una cantidad disponible mayor que cero.")
+    if payload.quantity_kg <= 0:
+        raise HTTPException(status_code=422, detail="La oferta disponible debe ser mayor que cero.")
     record = models.InventorySnapshot(**payload.model_dump(), created_by=user.id)
     db.add(record)
     db.commit()
@@ -329,6 +329,17 @@ def list_models(_: models.User = Depends(auth.require_role("admin", "analyst")),
     return [schemas.ModelResponse.model_validate(item, from_attributes=True) for item in artifacts]
 
 
+@app.get("/api/v1/models/coverage", response_model=schemas.ObservationCoverage, tags=["models"])
+def model_coverage(product_code: str, region_code: str, _: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> schemas.ObservationCoverage:
+    require_catalog(product_code, region_code, db)
+    count = db.scalar(select(func.count(models.DemandObservation.id)).where(
+        models.DemandObservation.product_code == product_code,
+        models.DemandObservation.region_code == region_code,
+        models.DemandObservation.is_valid.is_(True),
+    )) or 0
+    return schemas.ObservationCoverage(product_code=product_code, region_code=region_code, valid_observations=count, minimum_required=ai_service.MINIMUM_TRAINING_ROWS)
+
+
 @app.post("/api/v1/matching/engine", response_model=schemas.MatchingResponse, tags=["matching"])
 async def run_matching(
     payload: schemas.MatchingRequest,
@@ -345,8 +356,6 @@ async def run_matching(
         models.InventorySnapshot.quantity_kg > 0,
         models.InventorySnapshot.recorded_at >= cutoff,
     )
-    if user.role == "viewer":
-        inventory_query = inventory_query.where(models.InventorySnapshot.created_by == user.id)
     inventory = db.scalar(
         inventory_query
         .order_by(desc(models.InventorySnapshot.recorded_at))
@@ -417,8 +426,6 @@ def matching_readiness(
         models.InventorySnapshot.quantity_kg > 0,
         models.InventorySnapshot.recorded_at >= cutoff,
     )
-    if user.role == "viewer":
-        inventory_query = inventory_query.where(models.InventorySnapshot.created_by == user.id)
     has_inventory = db.scalar(inventory_query.limit(1)) is not None
     has_model = db.scalar(select(models.ModelArtifact.id).where(
         models.ModelArtifact.product_code == product_code,
@@ -426,3 +433,14 @@ def matching_readiness(
         models.ModelArtifact.is_active.is_(True),
     ).limit(1)) is not None
     return schemas.MatchingReadiness(has_inventory=has_inventory, has_model=has_model, can_run=has_inventory and has_model)
+
+
+@app.get("/api/v1/matching/availability", response_model=list[schemas.ScenarioAvailability], tags=["matching"])
+def matching_availability(user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)) -> list[schemas.ScenarioAvailability]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
+    active_models = {(product, region) for product, region in db.execute(select(models.ModelArtifact.product_code, models.ModelArtifact.region_code).where(models.ModelArtifact.is_active.is_(True))).all()}
+    stocked = {(product, region) for product, region in db.execute(select(models.InventorySnapshot.product_code, models.InventorySnapshot.region_code).where(models.InventorySnapshot.quantity_kg > 0, models.InventorySnapshot.recorded_at >= cutoff)).all()}
+    return [
+        schemas.ScenarioAvailability(product_code=product, region_code=region, available=(product, region) in stocked)
+        for product, region in sorted(active_models)
+    ]

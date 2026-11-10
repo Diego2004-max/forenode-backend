@@ -115,6 +115,19 @@ class MatchingReadiness(BaseModel):
     can_run: bool
 
 
+class ScenarioAvailability(BaseModel):
+    product_code: str
+    region_code: str
+    available: bool
+
+
+class ObservationCoverage(BaseModel):
+    product_code: str
+    region_code: str
+    valid_observations: int
+    minimum_required: int
+
+
 class WeatherResponse(BaseModel):
     temperature_c: float
     precipitation_mm: float
