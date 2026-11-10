@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     supabase_url: str | None = None
     supabase_jwt_secret: str | None = None
     admin_email: str | None = None
+    admin_recovery_password: str | None = Field(default=None, min_length=10)
 
     @field_validator("database_url")
     @classmethod

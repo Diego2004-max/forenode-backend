@@ -80,6 +80,16 @@ async def lifespan(_: FastAPI):
                 text("UPDATE forenode_users SET role = 'admin' WHERE lower(email) = lower(:email)"),
                 {"email": settings.admin_email},
             )
+    if settings.admin_email and settings.admin_recovery_password:
+        with SessionLocal() as db:
+            administrator = db.scalar(select(models.User).where(models.User.email == settings.admin_email.lower()))
+            if administrator is not None:
+                # This value is intentionally supplied only for an emergency
+                # administrator recovery from Render's encrypted environment.
+                administrator.hashed_password = auth.get_password_hash(settings.admin_recovery_password)
+                administrator.role = "admin"
+                administrator.is_active = True
+                db.commit()
     yield
 
 
