@@ -54,6 +54,7 @@ class DemandObservation(Base):
     precipitation_mm: Mapped[float] = mapped_column(Float)
     source_reference: Mapped[str] = mapped_column(String(500))
     is_valid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("forenode_users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -70,6 +71,7 @@ class ModelArtifact(Base):
     residual_p90_kg: Mapped[float] = mapped_column(Float)
     artifact: Mapped[bytes] = mapped_column(LargeBinary)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

@@ -101,6 +101,7 @@ class ModelResponse(BaseModel):
     mae_kg: float
     r2_score: float
     residual_p90_kg: float
+    is_demo: bool = False
 
 
 class MatchingRequest(BaseModel):
@@ -120,6 +121,7 @@ class ScenarioAvailability(BaseModel):
     product_code: str
     region_code: str
     available: bool
+    is_demo: bool = False
 
 
 class ObservationCoverage(BaseModel):
@@ -156,6 +158,12 @@ class MatchingResponse(BaseModel):
     model_version: str
     model_mae_kg: float
     explanation: str
+    is_demo: bool = False
+
+
+class DemoBootstrapResponse(BaseModel):
+    created_models: int
+    skipped_models: int
 
 
 class CatalogResponse(BaseModel):

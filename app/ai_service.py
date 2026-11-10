@@ -31,11 +31,14 @@ class Prediction:
 
 
 def train_model(db: Session, product_code: str, region_code: str) -> models.ModelArtifact:
-    observations = db.scalars(
+    all_observations = db.scalars(
         select(models.DemandObservation)
         .where(models.DemandObservation.product_code == product_code, models.DemandObservation.region_code == region_code, models.DemandObservation.is_valid.is_(True))
         .order_by(models.DemandObservation.observed_on)
     ).all()
+    real_observations = [item for item in all_observations if not item.is_demo]
+    demo_observations = [item for item in all_observations if item.is_demo]
+    observations = real_observations if len(real_observations) >= MINIMUM_TRAINING_ROWS else demo_observations
     if len(observations) < MINIMUM_TRAINING_ROWS:
         raise ValueError(f"Se requieren al menos {MINIMUM_TRAINING_ROWS} observaciones reales; hay {len(observations)}.")
     features = np.asarray([feature_vector(x.observed_on.month, x.temperature_c, x.precipitation_mm) for x in observations])
@@ -66,6 +69,7 @@ def train_model(db: Session, product_code: str, region_code: str) -> models.Mode
         product_code=product_code, region_code=region_code, version=version,
         training_rows=len(observations), mae_kg=mae, r2_score=r2,
         residual_p90_kg=residual_p90, artifact=buffer.getvalue(), is_active=True,
+        is_demo=bool(observations[0].is_demo),
     )
     db.add(artifact)
     db.commit()

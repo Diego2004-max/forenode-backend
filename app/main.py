@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
+from math import pi, sin
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,11 +59,16 @@ async def lifespan(_: FastAPI):
     inspector = inspect(engine)
     user_columns = {column["name"] for column in inspector.get_columns("forenode_users")}
     observation_columns = {column["name"] for column in inspector.get_columns("demand_observations")}
+    artifact_columns = {column["name"] for column in inspector.get_columns("model_artifacts")}
     with engine.begin() as connection:
         if "is_active" not in user_columns:
             connection.execute(text("ALTER TABLE forenode_users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE"))
         if "is_valid" not in observation_columns:
             connection.execute(text("ALTER TABLE demand_observations ADD COLUMN is_valid BOOLEAN NOT NULL DEFAULT TRUE"))
+        if "is_demo" not in observation_columns:
+            connection.execute(text("ALTER TABLE demand_observations ADD COLUMN is_demo BOOLEAN NOT NULL DEFAULT FALSE"))
+        if "is_demo" not in artifact_columns:
+            connection.execute(text("ALTER TABLE model_artifacts ADD COLUMN is_demo BOOLEAN NOT NULL DEFAULT FALSE"))
     with SessionLocal() as db:
         for region in REGIONS.values():
             if db.scalar(select(models.RegionNode.id).where(models.RegionNode.code == region.code)) is None:
@@ -115,6 +121,44 @@ def get_region(db: Session, region_code: str):
     if node is None:
         raise HTTPException(status_code=422, detail="Nodo regional no disponible.")
     return node
+
+
+def month_before(reference: date, offset: int) -> date:
+    serial = reference.year * 12 + reference.month - 1 - offset
+    return date(serial // 12, serial % 12 + 1, 15)
+
+
+def create_demo_observations(db: Session, product_code: str, region_code: str, user_id: int) -> None:
+    """Create isolated, deterministic technical test observations for one scenario."""
+    source = "FORNODE_DEMO_V4 · Datos de prueba generados para validación técnica"
+    existing = db.scalar(select(models.DemandObservation.id).where(
+        models.DemandObservation.product_code == product_code,
+        models.DemandObservation.region_code == region_code,
+        models.DemandObservation.is_demo.is_(True),
+    ).limit(1))
+    if existing is not None:
+        return
+    product_base = {"coffee-arabica": 680.0, "papa-pastusa": 900.0, "lulo-andino": 520.0, "quinoa-real": 430.0}[product_code]
+    region_factor = 0.92 + list(REGIONS).index(region_code) * 0.045
+    reference = datetime.now(timezone.utc).date()
+    for offset in range(12, 0, -1):
+        observed_on = month_before(reference, offset)
+        seasonal = sin(2 * pi * observed_on.month / 12)
+        temperature = 13.0 + list(REGIONS).index(region_code) * 0.35 + seasonal * 1.8
+        precipitation = max(5.0, 88.0 + seasonal * 42.0)
+        demand = product_base * region_factor * (1.0 + seasonal * 0.12)
+        db.add(models.DemandObservation(
+            product_code=product_code,
+            region_code=region_code,
+            observed_on=observed_on,
+            demand_kg=round(demand, 2),
+            temperature_c=round(temperature, 2),
+            precipitation_mm=round(precipitation, 2),
+            source_reference=source,
+            is_valid=True,
+            is_demo=True,
+            created_by=user_id,
+        ))
 
 
 def token_for(user: models.User) -> schemas.TokenResponse:
@@ -342,6 +386,47 @@ def model_coverage(product_code: str, region_code: str, _: models.User = Depends
     return schemas.ObservationCoverage(product_code=product_code, region_code=region_code, valid_observations=count, minimum_required=ai_service.MINIMUM_TRAINING_ROWS)
 
 
+@api.post("/api/v1/models/demo-bootstrap", response_model=schemas.DemoBootstrapResponse, tags=["models"])
+def bootstrap_demo_models(
+    user: models.User = Depends(auth.require_role("admin", "analyst")),
+    db: Session = Depends(get_db),
+) -> schemas.DemoBootstrapResponse:
+    """Prepare clearly labelled technical test scenarios without replacing active models."""
+    created_models = 0
+    skipped_models = 0
+    demo_inventory_source = "FORNODE_DEMO_V4 · Oferta de prueba para validación técnica"
+    for region_code in REGIONS:
+        for product_code in PRODUCTS:
+            active_artifact = db.scalar(select(models.ModelArtifact.id).where(
+                models.ModelArtifact.product_code == product_code,
+                models.ModelArtifact.region_code == region_code,
+                models.ModelArtifact.is_active.is_(True),
+            ).limit(1))
+            if active_artifact is not None:
+                skipped_models += 1
+                continue
+            create_demo_observations(db, product_code, region_code, user.id)
+            db.commit()
+            ai_service.train_model(db, product_code, region_code)
+            inventory = db.scalar(select(models.InventorySnapshot.id).where(
+                models.InventorySnapshot.product_code == product_code,
+                models.InventorySnapshot.region_code == region_code,
+                models.InventorySnapshot.quantity_kg > 0,
+            ).limit(1))
+            if inventory is None:
+                db.add(models.InventorySnapshot(
+                    product_code=product_code,
+                    region_code=region_code,
+                    quantity_kg=round({"coffee-arabica": 720.0, "papa-pastusa": 900.0, "lulo-andino": 540.0, "quinoa-real": 450.0}[product_code], 2),
+                    recorded_at=datetime.now(timezone.utc),
+                    source_reference=demo_inventory_source,
+                    created_by=user.id,
+                ))
+                db.commit()
+            created_models += 1
+    return schemas.DemoBootstrapResponse(created_models=created_models, skipped_models=skipped_models)
+
+
 @api.post("/api/v1/matching/engine", response_model=schemas.MatchingResponse, tags=["matching"])
 async def run_matching(
     payload: schemas.MatchingRequest,
@@ -411,6 +496,7 @@ async def run_matching(
         inventory_recorded_at=inventory.recorded_at, inventory_source=inventory.source_reference,
         gap_kg=round(gap, 2), market_status=market_status, confidence_score=round(prediction.confidence, 3),
         model_version=artifact.version, model_mae_kg=round(artifact.mae_kg, 2), explanation=explanation,
+        is_demo=artifact.is_demo,
     )
 
 
@@ -441,11 +527,11 @@ def matching_readiness(
 @api.get("/api/v1/matching/availability", response_model=list[schemas.ScenarioAvailability], tags=["matching"])
 def matching_availability(user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)) -> list[schemas.ScenarioAvailability]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
-    active_models = {(product, region) for product, region in db.execute(select(models.ModelArtifact.product_code, models.ModelArtifact.region_code).where(models.ModelArtifact.is_active.is_(True))).all()}
+    active_models = {(product, region): is_demo for product, region, is_demo in db.execute(select(models.ModelArtifact.product_code, models.ModelArtifact.region_code, models.ModelArtifact.is_demo).where(models.ModelArtifact.is_active.is_(True))).all()}
     stocked = {(product, region) for product, region in db.execute(select(models.InventorySnapshot.product_code, models.InventorySnapshot.region_code).where(models.InventorySnapshot.quantity_kg > 0, models.InventorySnapshot.recorded_at >= cutoff)).all()}
     return [
-        schemas.ScenarioAvailability(product_code=product, region_code=region, available=(product, region) in stocked)
-        for product, region in sorted(active_models)
+        schemas.ScenarioAvailability(product_code=product, region_code=region, available=(product, region) in stocked, is_demo=is_demo)
+        for (product, region), is_demo in sorted(active_models.items())
     ]
 
 # Wrap the complete ASGI application so CORS headers also reach unhandled
