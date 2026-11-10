@@ -408,10 +408,12 @@ def bootstrap_demo_models(
             create_demo_observations(db, product_code, region_code, user.id)
             db.commit()
             ai_service.train_model(db, product_code, region_code)
+            inventory_cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
             inventory = db.scalar(select(models.InventorySnapshot.id).where(
                 models.InventorySnapshot.product_code == product_code,
                 models.InventorySnapshot.region_code == region_code,
                 models.InventorySnapshot.quantity_kg > 0,
+                models.InventorySnapshot.recorded_at >= inventory_cutoff,
             ).limit(1))
             if inventory is None:
                 db.add(models.InventorySnapshot(
