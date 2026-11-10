@@ -224,13 +224,15 @@ async def run_matching(
     region = REGIONS[payload.region_code]
     product = PRODUCTS[payload.product_code]
     cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
+    inventory_query = select(models.InventorySnapshot).where(
+        models.InventorySnapshot.product_code == payload.product_code,
+        models.InventorySnapshot.region_code == payload.region_code,
+        models.InventorySnapshot.recorded_at >= cutoff,
+    )
+    if user.role == "viewer":
+        inventory_query = inventory_query.where(models.InventorySnapshot.created_by == user.id)
     inventory = db.scalar(
-        select(models.InventorySnapshot)
-        .where(
-            models.InventorySnapshot.product_code == payload.product_code,
-            models.InventorySnapshot.region_code == payload.region_code,
-            models.InventorySnapshot.recorded_at >= cutoff,
-        )
+        inventory_query
         .order_by(desc(models.InventorySnapshot.recorded_at))
     )
     if inventory is None:
