@@ -45,7 +45,7 @@ class WeatherService:
             try:
                 async with httpx.AsyncClient(
                     timeout=self.settings.weather_timeout_seconds,
-                    trust_env=False,
+                    follow_redirects=True,
                     headers={"User-Agent": "ForenodeAI/4.0 weather-service"},
                 ) as client:
                     response = await client.get(base_url, params=params)
