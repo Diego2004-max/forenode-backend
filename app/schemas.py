@@ -110,7 +110,7 @@ class MatchingRequest(BaseModel):
     product_code: str
     region_code: str
     target_date: date
-    evaluated_supply_kg: float = Field(gt=0, description="Cantidad que la persona desea comparar con la demanda prevista.")
+    inventory_snapshot_id: int = Field(gt=0, description="Oferta registrada y trazable que se utilizará en el balance.")
 
 
 class MatchingReadiness(BaseModel):
@@ -161,11 +161,6 @@ class MatchingResponse(BaseModel):
     model_mae_kg: float
     explanation: str
     is_demo: bool = False
-
-
-class DemoBootstrapResponse(BaseModel):
-    created_models: int
-    skipped_models: int
 
 
 class CatalogResponse(BaseModel):

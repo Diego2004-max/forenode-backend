@@ -1,11 +1,10 @@
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
-from math import pi, sin
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import desc, func, inspect, select, text
+from sqlalchemy import delete, desc, func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from . import ai_service, auth, models, schemas
@@ -121,44 +120,6 @@ def get_region(db: Session, region_code: str):
     if node is None:
         raise HTTPException(status_code=422, detail="Nodo regional no disponible.")
     return node
-
-
-def month_before(reference: date, offset: int) -> date:
-    serial = reference.year * 12 + reference.month - 1 - offset
-    return date(serial // 12, serial % 12 + 1, 15)
-
-
-def create_demo_observations(db: Session, product_code: str, region_code: str, user_id: int) -> None:
-    """Create isolated, deterministic technical test observations for one scenario."""
-    source = "FORNODE_DEMO_V4 · Datos de prueba generados para validación técnica"
-    existing = db.scalar(select(models.DemandObservation.id).where(
-        models.DemandObservation.product_code == product_code,
-        models.DemandObservation.region_code == region_code,
-        models.DemandObservation.is_demo.is_(True),
-    ).limit(1))
-    if existing is not None:
-        return
-    product_base = {"coffee-arabica": 680.0, "papa-pastusa": 900.0, "lulo-andino": 520.0, "quinoa-real": 430.0}[product_code]
-    region_factor = 0.92 + list(REGIONS).index(region_code) * 0.045
-    reference = datetime.now(timezone.utc).date()
-    for offset in range(12, 0, -1):
-        observed_on = month_before(reference, offset)
-        seasonal = sin(2 * pi * observed_on.month / 12)
-        temperature = 13.0 + list(REGIONS).index(region_code) * 0.35 + seasonal * 1.8
-        precipitation = max(5.0, 88.0 + seasonal * 42.0)
-        demand = product_base * region_factor * (1.0 + seasonal * 0.12)
-        db.add(models.DemandObservation(
-            product_code=product_code,
-            region_code=region_code,
-            observed_on=observed_on,
-            demand_kg=round(demand, 2),
-            temperature_c=round(temperature, 2),
-            precipitation_mm=round(precipitation, 2),
-            source_reference=source,
-            is_valid=True,
-            is_demo=True,
-            created_by=user_id,
-        ))
 
 
 def token_for(user: models.User) -> schemas.TokenResponse:
@@ -339,7 +300,7 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 @api.post("/api/v1/inventory", response_model=schemas.InventoryResponse, status_code=201, tags=["data"])
 def create_inventory(
     payload: schemas.InventoryCreate,
-    user: models.User = Depends(auth.require_role("admin", "analyst")),
+    user: models.User = Depends(auth.get_current_user),
     db: Session = Depends(get_db),
 ) -> models.InventorySnapshot:
     require_catalog(payload.product_code, payload.region_code, db)
@@ -389,7 +350,10 @@ def train(
 
 @api.get("/api/v1/models", response_model=list[schemas.ModelResponse], tags=["models"])
 def list_models(_: models.User = Depends(auth.require_role("admin", "analyst")), db: Session = Depends(get_db)) -> list[schemas.ModelResponse]:
-    artifacts = db.scalars(select(models.ModelArtifact).where(models.ModelArtifact.is_active.is_(True)).order_by(desc(models.ModelArtifact.trained_at))).all()
+    artifacts = db.scalars(select(models.ModelArtifact).where(
+        models.ModelArtifact.is_active.is_(True),
+        models.ModelArtifact.is_demo.is_(False),
+    ).order_by(desc(models.ModelArtifact.trained_at))).all()
     return [schemas.ModelResponse.model_validate(item, from_attributes=True) for item in artifacts]
 
 
@@ -400,51 +364,29 @@ def model_coverage(product_code: str, region_code: str, _: models.User = Depends
         models.DemandObservation.product_code == product_code,
         models.DemandObservation.region_code == region_code,
         models.DemandObservation.is_valid.is_(True),
+        models.DemandObservation.is_demo.is_(False),
     )) or 0
     return schemas.ObservationCoverage(product_code=product_code, region_code=region_code, valid_observations=count, minimum_required=ai_service.MINIMUM_TRAINING_ROWS)
 
 
-@api.post("/api/v1/models/demo-bootstrap", response_model=schemas.DemoBootstrapResponse, tags=["models"])
-def bootstrap_demo_models(
-    user: models.User = Depends(auth.require_role("admin", "analyst")),
+@api.delete("/api/v1/models/demo-scenarios", status_code=204, tags=["models"])
+def delete_demo_scenarios(
+    _: models.User = Depends(auth.require_role("admin", "analyst")),
     db: Session = Depends(get_db),
-) -> schemas.DemoBootstrapResponse:
-    """Prepare clearly labelled technical test scenarios without replacing active models."""
-    created_models = 0
-    skipped_models = 0
-    demo_inventory_source = "FORNODE_DEMO_V4 · Oferta de prueba para validación técnica"
-    for region_code in REGIONS:
-        for product_code in PRODUCTS:
-            active_artifact = db.scalar(select(models.ModelArtifact.id).where(
-                models.ModelArtifact.product_code == product_code,
-                models.ModelArtifact.region_code == region_code,
-                models.ModelArtifact.is_active.is_(True),
-            ).limit(1))
-            if active_artifact is not None:
-                skipped_models += 1
-                continue
-            create_demo_observations(db, product_code, region_code, user.id)
-            db.commit()
-            ai_service.train_model(db, product_code, region_code)
-            inventory_cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
-            inventory = db.scalar(select(models.InventorySnapshot.id).where(
-                models.InventorySnapshot.product_code == product_code,
-                models.InventorySnapshot.region_code == region_code,
-                models.InventorySnapshot.quantity_kg > 0,
-                models.InventorySnapshot.recorded_at >= inventory_cutoff,
-            ).limit(1))
-            if inventory is None:
-                db.add(models.InventorySnapshot(
-                    product_code=product_code,
-                    region_code=region_code,
-                    quantity_kg=round({"coffee-arabica": 720.0, "papa-pastusa": 900.0, "lulo-andino": 540.0, "quinoa-real": 450.0}[product_code], 2),
-                    recorded_at=datetime.now(timezone.utc),
-                    source_reference=demo_inventory_source,
-                    created_by=user.id,
-                ))
-                db.commit()
-            created_models += 1
-    return schemas.DemoBootstrapResponse(created_models=created_models, skipped_models=skipped_models)
+) -> None:
+    """Remove all generated technical data; operational results stay real-only."""
+    demo_versions = list(db.scalars(select(models.ModelArtifact.version).where(models.ModelArtifact.is_demo.is_(True))).all())
+    demo_inventory_ids = list(db.scalars(select(models.InventorySnapshot.id).where(
+        models.InventorySnapshot.source_reference.like("FORNODE_DEMO_V4%")
+    )).all())
+    if demo_versions:
+        db.execute(delete(models.MatchingRun).where(models.MatchingRun.model_version.in_(demo_versions)))
+    if demo_inventory_ids:
+        db.execute(delete(models.MatchingRun).where(models.MatchingRun.inventory_snapshot_id.in_(demo_inventory_ids)))
+        db.execute(delete(models.InventorySnapshot).where(models.InventorySnapshot.id.in_(demo_inventory_ids)))
+    db.execute(delete(models.ModelArtifact).where(models.ModelArtifact.is_demo.is_(True)))
+    db.execute(delete(models.DemandObservation).where(models.DemandObservation.is_demo.is_(True)))
+    db.commit()
 
 
 @api.post("/api/v1/matching/engine", response_model=schemas.MatchingResponse, tags=["matching"])
@@ -458,6 +400,7 @@ async def run_matching(
     product = PRODUCTS[payload.product_code]
     cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
     inventory_query = select(models.InventorySnapshot).where(
+        models.InventorySnapshot.id == payload.inventory_snapshot_id,
         models.InventorySnapshot.product_code == payload.product_code,
         models.InventorySnapshot.region_code == payload.region_code,
         models.InventorySnapshot.quantity_kg > 0,
@@ -476,6 +419,7 @@ async def run_matching(
             models.ModelArtifact.product_code == payload.product_code,
             models.ModelArtifact.region_code == payload.region_code,
             models.ModelArtifact.is_active.is_(True),
+            models.ModelArtifact.is_demo.is_(False),
         )
         .order_by(desc(models.ModelArtifact.trained_at))
     )
@@ -483,21 +427,21 @@ async def run_matching(
         raise HTTPException(status_code=409, detail="No existe un modelo entrenado con observaciones reales para esta combinación.")
     weather = await WeatherService().get_daily(region.latitude, region.longitude, payload.target_date)
     prediction = ai_service.predict(artifact, payload.target_date.month, weather.temperature_c, weather.precipitation_mm)
-    evaluated_supply_kg = payload.evaluated_supply_kg
-    gap = prediction.demand_kg - evaluated_supply_kg
+    available_supply_kg = inventory.quantity_kg
+    gap = prediction.demand_kg - available_supply_kg
     ratio = gap / max(prediction.demand_kg, 1.0)
     if ratio > 0.10:
         market_status = "critical_deficit"
-        explanation = "La cantidad evaluada no cubre la demanda prevista; se recomienda activar abastecimiento alterno."
+        explanation = "La oferta registrada no cubre la demanda prevista; se recomienda activar abastecimiento alterno."
     elif ratio < -0.10:
         market_status = "high_surplus"
-        explanation = "La cantidad evaluada supera la demanda prevista; conviene priorizar redistribución y conservación."
+        explanation = "La oferta registrada supera la demanda prevista; conviene priorizar redistribución y conservación."
     else:
         market_status = "balanced"
-        explanation = "La cantidad evaluada está dentro de una banda del 10 % respecto de la demanda prevista."
+        explanation = "La oferta registrada está dentro de una banda del 10 % respecto de la demanda prevista."
     run = models.MatchingRun(
         product_code=payload.product_code, region_code=payload.region_code, target_date=payload.target_date,
-        predicted_demand_kg=prediction.demand_kg, available_supply_kg=evaluated_supply_kg, gap_kg=gap,
+        predicted_demand_kg=prediction.demand_kg, available_supply_kg=available_supply_kg, gap_kg=gap,
         status=market_status, confidence_score=prediction.confidence, model_version=artifact.version,
         weather_source=weather.source, inventory_snapshot_id=inventory.id, requested_by=user.id, explanation=explanation,
     )
@@ -512,7 +456,7 @@ async def run_matching(
             observed_or_forecast=weather.kind, source=weather.source,
         ),
         predicted_demand_kg=round(prediction.demand_kg, 2), demand_lower_kg=round(prediction.lower_kg, 2),
-        demand_upper_kg=round(prediction.upper_kg, 2), available_supply_kg=round(evaluated_supply_kg, 2),
+        demand_upper_kg=round(prediction.upper_kg, 2), available_supply_kg=round(available_supply_kg, 2),
         inventory_recorded_at=inventory.recorded_at, inventory_source=inventory.source_reference,
         gap_kg=round(gap, 2), market_status=market_status, confidence_score=round(prediction.confidence, 3),
         model_version=artifact.version, model_mae_kg=round(artifact.mae_kg, 2), explanation=explanation,
@@ -540,6 +484,7 @@ def matching_readiness(
         models.ModelArtifact.product_code == product_code,
         models.ModelArtifact.region_code == region_code,
         models.ModelArtifact.is_active.is_(True),
+        models.ModelArtifact.is_demo.is_(False),
     ).limit(1)) is not None
     return schemas.MatchingReadiness(has_inventory=has_inventory, has_model=has_model, can_run=has_inventory and has_model)
 
@@ -547,7 +492,10 @@ def matching_readiness(
 @api.get("/api/v1/matching/availability", response_model=list[schemas.ScenarioAvailability], tags=["matching"])
 def matching_availability(user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)) -> list[schemas.ScenarioAvailability]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inventory_max_age_hours)
-    active_models = {(product, region): is_demo for product, region, is_demo in db.execute(select(models.ModelArtifact.product_code, models.ModelArtifact.region_code, models.ModelArtifact.is_demo).where(models.ModelArtifact.is_active.is_(True))).all()}
+    active_models = {(product, region): is_demo for product, region, is_demo in db.execute(select(models.ModelArtifact.product_code, models.ModelArtifact.region_code, models.ModelArtifact.is_demo).where(
+        models.ModelArtifact.is_active.is_(True),
+        models.ModelArtifact.is_demo.is_(False),
+    )).all()}
     stocked = {(product, region) for product, region in db.execute(select(models.InventorySnapshot.product_code, models.InventorySnapshot.region_code).where(models.InventorySnapshot.quantity_kg > 0, models.InventorySnapshot.recorded_at >= cutoff)).all()}
     return [
         schemas.ScenarioAvailability(product_code=product, region_code=region, available=(product, region) in stocked, is_demo=is_demo)
